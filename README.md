@@ -37,3 +37,17 @@
 
 ## Локально
 Python 3.12; `pip install -r requirements.txt`; `python -m playwright install --with-deps chromium`; налаштуйте змінні оточення й виконайте `python app.py`. Без TELEGRAM_BOT_TOKEN та TELEGRAM_CHAT_ID сайт працює, Telegram вимкнений. На Railway пароль обов’язковий; локально без пароля не відкривайте сервіс в інтернет.
+
+
+### Джерела результатів
+
+Моніторинг відкриває лише три окремі сторінки:
+- Roulette Macao: https://gamblingcounting.com/ru/pragmatic-roulette-macao
+- Romanian Roulette: https://gamblingcounting.com/ru/pragmatic-romanian-roulette
+- Speed Roulette 2: https://gamblingcounting.com/ru/pragmatic-speed-roulette-2
+
+Числа читаються тільки з `.live-game-page__block__results--roulette .roulette-number`.
+Змінна `SOURCE_URL` більше не використовується. На панелі показується стан кожної сторінки.
+Структуру та 200 результатів перевірено на збереженому HTML Romanian Roulette.
+Живий доступ із Railway та структуру двох інших сторінок ще не підтверджено;
+прямі посилання самі по собі не усувають перевірку Cloudflare.
