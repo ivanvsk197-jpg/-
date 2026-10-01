@@ -18,7 +18,12 @@ import re
 # НАЛАШТУВАННЯ
 # ============================================================
 
-URL = os.getenv("SOURCE_URL", "https://gamblingcounting.com/ru/roulette/pragmatic")
+SOURCE_PAGES = {
+    "Roulette Macao": "https://gamblingcounting.com/ru/pragmatic-roulette-macao",
+    "Romanian Roulette": "https://gamblingcounting.com/ru/pragmatic-romanian-roulette",
+    "Speed Roulette 2": "https://gamblingcounting.com/ru/pragmatic-speed-roulette-2",
+}
+HISTORY_SELECTOR = ".live-game-page__block__results--roulette .roulette-number"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -177,17 +182,7 @@ async def process_filter_telegram_signals(stats):
 # РУЛЕТКИ, ЯКІ АНАЛІЗУЄМО
 # ============================================================
 
-TARGET_ROULETTES = [
-    "Romanian Roulette",
-    "Speed Roulette 2",
-    "Roulette 2 Extra Time",
-    "Speed Auto Roulette",
-    "Auto Mega Roulette",
-    "Roulette Macao",
-    "Roulette 1",
-    "Lucky 6 Roulette",
-    "Mega Roulette"
-]
+TARGET_ROULETTES = list(SOURCE_PAGES)
 
 
 # ============================================================
@@ -1215,91 +1210,23 @@ async def main():
         # СТОРІНКА
         # ====================================================
 
-        if browser.pages:
-            page = browser.pages[0]
-        else:
+        pages = {}
+        source_details = {name: "Очікуємо завантаження" for name in SOURCE_PAGES}
+        last_source_refresh = {}
+        for name, url in SOURCE_PAGES.items():
             page = await browser.new_page()
+            pages[name] = page
+            now = asyncio.get_running_loop().time()
+            last_source_refresh[name] = now
+            try:
+                response = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                source_details[name] = f"HTTP {response.status if response else 0}; очікуємо історію"
+                print(f"{name}: {source_details[name]}", flush=True)
+            except Exception as e:
+                source_details[name] = safe_error(e)
+                print(f"{name}: {source_details[name]}", flush=True)
+        set_status("source", "\n".join(f"{n}: {v}" for n, v in source_details.items()))
 
-
-        # ====================================================
-        # ДІАГНОСТИКА
-        # ====================================================
-
-        page.on(
-            "pageerror",
-            lambda error: print(
-                f"🔴 JavaScript error: {error}"
-            )
-        )
-
-
-        page.on(
-            "requestfailed",
-            lambda request: print(
-                f"❌ Request failed: "
-                f"{request.method} "
-                f"{request.url}"
-            )
-        )
-
-
-        # ====================================================
-        # ВІДКРИВАЄМО САЙТ
-        # ====================================================
-
-        print("🌐 Відкриваю сайт...")
-
-
-        try:
-
-            set_status("source", "Завантаження сайту-джерела")
-            response = await page.goto(
-                URL,
-                wait_until="domcontentloaded",
-                timeout=60000
-            )
-
-            set_status("source", f"Сайт відкрито, HTTP {response.status if response else 0}; очікуємо числа")
-
-        except Exception as e:
-
-            print(
-                f"⚠️ Помилка відкриття сайту: {safe_error(e)}"
-            )
-
-
-        # ====================================================
-        # ЧЕКАЄМО РУЛЕТКИ
-        # ====================================================
-
-        print("⏳ Чекаю блоки рулеток...")
-
-
-        try:
-
-            await page.wait_for_selector(
-                ".live-game__block",
-                timeout=60000
-            )
-
-            print("✅ Блоки рулеток знайдено")
-
-        except Exception:
-
-            print(
-                "⚠️ Блоки поки не знайдені."
-            )
-
-
-        # Додатково даємо сайту завантажитися
-        await page.wait_for_timeout(10000)
-
-
-        # ====================================================
-        # Автоматичний запуск на сервері; Enter не потрібен.
-        print("🚀 Автоматичний аналіз запущено", flush=True)
-        last_source_data = asyncio.get_running_loop().time()
-        last_source_refresh = last_source_data
         # ====================================================
         # ОСНОВНИЙ ЦИКЛ
         # ====================================================
@@ -1332,79 +1259,27 @@ async def main():
                 # ЗНАХОДИМО ВСІ РУЛЕТКИ
                 # =================================================
 
-                roulette_blocks = page.locator(
-                    ".live-game__block"
-                )
-
-                if page.is_closed():
-                    raise RuntimeError("Chromium page closed")
-                count = await roulette_blocks.count()
-                if asyncio.get_running_loop().time() - last_source_data > 90:
-                    set_status("source", f"Немає чисел понад 90 сек; знайдено блоків: {count}. Перезавантажуємо джерело")
-                    if asyncio.get_running_loop().time() - last_source_refresh > 90:
-                        await page.reload(wait_until="domcontentloaded", timeout=60000)
-                        last_source_refresh = asyncio.get_running_loop().time()
-
-
-
-                print(
-                    f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-                    f"🎰 Знайдено рулеток: {count}"
-                )
-
-
-                # =================================================
-                # КОЖНА РУЛЕТКА
-                # =================================================
-
-                for i in range(count):
-
-                    block = roulette_blocks.nth(i)
-
-
-                    # ------------------------------------------------
-                    # НАЗВА
-                    # ------------------------------------------------
-
+                for name, page in pages.items():
                     try:
-
-                        name = await block.locator(
-                            "span.live-game__block__title__text"
-                        ).inner_text(
-                            timeout=3000
-                        )
-
-                        name = name.strip()
-
-                    except Exception:
-                        continue
-
-
-                    # Аналізуємо лише потрібні рулетки
-                    if name not in TARGET_ROULETTES:
-                        continue
-
-
-                    # ------------------------------------------------
-                    # ЧИСЛА
-                    # ------------------------------------------------
-
-                    try:
-
-                        numbers_raw = await block.locator(
-                            ".live-game__block__last__roulette "
-                            ".roulette-number"
-                        ).all_inner_texts()
-
+                        if page.is_closed():
+                            raise RuntimeError(f"{name}: Chromium page closed")
+                        numbers_raw = await page.locator(HISTORY_SELECTOR).all_inner_texts()
+                        if not numbers_raw:
+                            title = await page.title()
+                            source_details[name] = f"Історії немає; сторінка: {title[:100]}"
+                            now = asyncio.get_running_loop().time()
+                            if now - last_source_refresh[name] > 90:
+                                print(f"{name}: {source_details[name]}", flush=True)
+                                await page.reload(wait_until="domcontentloaded", timeout=30000)
+                                last_source_refresh[name] = now
+                            set_status("source", "\n".join(f"{n}: {v}" for n, v in source_details.items()))
+                            continue
                     except Exception as e:
-
-                        print(
-                            f"⚠️ {name}: "
-                            f"помилка читання чисел: {e}"
-                        )
-
+                        if page.is_closed():
+                            raise
+                        source_details[name] = safe_error(e)
+                        set_status("source", "\n".join(f"{n}: {v}" for n, v in source_details.items()))
                         continue
-
 
                     numbers = []
 
@@ -1459,10 +1334,9 @@ async def main():
                     # ДЮЖИНА
                     # =================================================
 
-                    last_source_data = asyncio.get_running_loop().time()
                     set_status("last_read", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                    with status_lock:
-                        service_status["source"] = "Числа читаються; нові спіни додаються автоматично"
+                    source_details[name] = f"Читається {len(numbers)} результатів; останнє число: {numbers[0]}"
+                    set_status("source", "\n".join(f"{n}: {v}" for n, v in source_details.items()))
                     fresh_numbers = get_session_numbers(name, numbers)
 
                     dozen_streak, dozen_number = get_streak(
@@ -1667,9 +1541,9 @@ def restore_checkpoint():
         return
     with open(CHECKPOINT, encoding='utf-8') as f:
         data = json.load(f)
-    session_numbers.update(data['numbers'])
-    session_last_signature.update({k:tuple(v) if v else None for k,v in data['signatures'].items()})
-    dashboard_state.update(data['state'])
+    session_numbers.update({k:v for k,v in data['numbers'].items() if k in TARGET_ROULETTES})
+    session_last_signature.update({k:tuple(v) if v else None for k,v in data['signatures'].items() if k in TARGET_ROULETTES})
+    dashboard_state.update({k:v for k,v in data['state'].items() if k in TARGET_ROULETTES})
     for row in dashboard_state.values():
         if row.get('last_seen'):
             row['last_seen'] = tuple(row['last_seen'])
