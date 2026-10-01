@@ -20,13 +20,28 @@ import re
 
 URL = os.getenv("SOURCE_URL", "https://gamblingcounting.com/ru/roulette/pragmatic")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else None
 DATA_DIR = os.getenv("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 state_lock = threading.RLock()
+service_status = {"source": "Запуск моніторингу", "telegram": "Запуск бота", "last_read": None}
+status_lock = threading.Lock()
+
+def set_status(key, value):
+    with status_lock:
+        service_status[key] = value
+    if key != "last_read":
+        print(f"{key}: {value}", flush=True)
+
+def safe_error(exc):
+    text = f"{type(exc).__name__}: {exc}"
+    if TELEGRAM_BOT_TOKEN:
+        text = text.replace(TELEGRAM_BOT_TOKEN, "[token]")
+    return text[:500]
+
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
 if os.getenv("RAILWAY_ENVIRONMENT") and not DASHBOARD_PASSWORD:
@@ -618,7 +633,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;fl
 </style></head>
 <body><div class="wrap">
 <header><div class="title"><h1>🎰 Моніторинг рулеток</h1><div class="sub">Активні та останні завершені серії дюжин і колон</div></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><button class="reset-btn" id="resetBtn" onclick="resetSession()">⟲ Новий сеанс / скинути історію</button><div class="online"><span class="dot"></span>Оновлення кожні 3 сек · <span id="clock">--:--:--</span></div></div></header>
-<div class="tabs"><button class="tab-btn active" id="seriesTab" onclick="showView('series')">🎯 Серії</button><button class="tab-btn" id="statsTab" onclick="showView('stats')">📊 Таблиця статистики</button></div><div id="seriesView"><div class="series-pct-toolbar">
+<div id="serviceStatus" style="padding:12px;margin-bottom:14px;background:#10243a;border:1px solid #29445f;border-radius:10px;white-space:pre-wrap">Перевіряємо джерело та Telegram…</div><div class="tabs"><button class="tab-btn active" id="seriesTab" onclick="showView('series')">🎯 Серії</button><button class="tab-btn" id="statsTab" onclick="showView('stats')">📊 Таблиця статистики</button></div><div id="seriesView"><div class="series-pct-toolbar">
  <span class="series-pct-title">📊 Відсотки за останні:</span>
  <button type="button" class="series-pct-btn active" data-pct-window="36">36</button>
  <button type="button" class="series-pct-btn" data-pct-window="50">50</button>
@@ -975,7 +990,7 @@ async function resetSession(){
  }
 }
 loadFilter();
-async function load(){try{const r=await fetch('/api/dashboard?'+Date.now());if(!r.ok)throw Error(r.status);payload=await r.json();filterRules=payload.rules||[];renderRules();updateFilterStatus();render();document.querySelector(".dot").style.background="#16d45b"}catch(e){document.querySelector(".dot").style.background="#ef4444"}}
+async function load(){try{const r=await fetch('/api/dashboard?'+Date.now());if(!r.ok)throw Error(r.status);payload=await r.json();const st=payload.service_status||{};document.getElementById('serviceStatus').textContent='Джерело: '+(st.source||'невідомо')+'\nTelegram: '+(st.telegram||'невідомо')+'\nОстаннє читання чисел: '+(st.last_read||'ще немає');filterRules=payload.rules||[];renderRules();updateFilterStatus();render();document.querySelector(".dot").style.background="#16d45b"}catch(e){document.querySelector(".dot").style.background="#ef4444"}}
 function tick(){clock.textContent=new Date().toLocaleTimeString('uk-UA')};tick();setInterval(tick,1000);load();setInterval(load,3000);
 </script></body></html>""".replace("__ROULETTE_ORDER__", json.dumps(TARGET_ROULETTES, ensure_ascii=False))
 
@@ -1011,6 +1026,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "winspin": build_winspin_stats(),
                     "maxima": stats_max_history,
                     "rules": server_filter_rules,
+                    "service_status": dict(service_status),
                     "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
@@ -1236,18 +1252,19 @@ async def main():
 
         try:
 
-            await page.goto(
+            set_status("source", "Завантаження сайту-джерела")
+            response = await page.goto(
                 URL,
                 wait_until="domcontentloaded",
                 timeout=60000
             )
 
-            print("✅ Сайт відкрито")
+            set_status("source", f"Сайт відкрито, HTTP {response.status if response else 0}; очікуємо числа")
 
         except Exception as e:
 
             print(
-                f"⚠️ Помилка відкриття сайту: {e}"
+                f"⚠️ Помилка відкриття сайту: {safe_error(e)}"
             )
 
 
@@ -1279,27 +1296,10 @@ async def main():
 
 
         # ====================================================
-        # РУЧНИЙ СТАРТ
-        # ====================================================
-
-        print()
-        print("==============================================")
-        print("Перевір браузер.")
-        print("Дочекайся, поки рулетки повністю завантажаться.")
-        print("Якщо потрібно — вибери потрібну вкладку.")
-        print("==============================================")
-        print()
-
-
-        # Unattended server startup.
-
-
-        print()
-        print("🚀 АНАЛІЗ ЗАПУЩЕНО")
-        print("CTRL+C — зупинити")
-        print()
-
-
+        # Автоматичний запуск на сервері; Enter не потрібен.
+        print("🚀 Автоматичний аналіз запущено", flush=True)
+        last_source_data = asyncio.get_running_loop().time()
+        last_source_refresh = last_source_data
         # ====================================================
         # ОСНОВНИЙ ЦИКЛ
         # ====================================================
@@ -1336,7 +1336,15 @@ async def main():
                     ".live-game__block"
                 )
 
+                if page.is_closed():
+                    raise RuntimeError("Chromium page closed")
                 count = await roulette_blocks.count()
+                if asyncio.get_running_loop().time() - last_source_data > 90:
+                    set_status("source", f"Немає чисел понад 90 сек; знайдено блоків: {count}. Перезавантажуємо джерело")
+                    if asyncio.get_running_loop().time() - last_source_refresh > 90:
+                        await page.reload(wait_until="domcontentloaded", timeout=60000)
+                        last_source_refresh = asyncio.get_running_loop().time()
+
 
 
                 print(
@@ -1451,6 +1459,10 @@ async def main():
                     # ДЮЖИНА
                     # =================================================
 
+                    last_source_data = asyncio.get_running_loop().time()
+                    set_status("last_read", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    with status_lock:
+                        service_status["source"] = "Числа читаються; нові спіни додаються автоматично"
                     fresh_numbers = get_session_numbers(name, numbers)
 
                     dozen_streak, dozen_number = get_streak(
@@ -1617,11 +1629,13 @@ async def main():
             except Exception as e:
 
                 print(
-                    f"⚠️ Помилка циклу: {e}"
+                    f"⚠️ Помилка циклу: {safe_error(e)}"
                 )
 
+                set_status("source", safe_error(e))
+                if page.is_closed():
+                    raise
                 await asyncio.sleep(5)
-
 
         await browser.close()
 
@@ -1674,8 +1688,8 @@ def keyboard(rows):
 
 def menu_keyboard():
     rows = [[('＋ Додати правило','add')], [('📋 Мої правила','rules'),('📊 Статус','status')]]
-    url = os.getenv('PUBLIC_URL', '')
-    if url.startswith('https://'):
+    url = os.getenv('PUBLIC_URL', '').strip()
+    if url.startswith('https://') and len(url[8:].split('/')[0]) > 3 and '$' not in url:
         markup = keyboard(rows)
         return InlineKeyboardMarkup(list(markup.inline_keyboard)+[[InlineKeyboardButton('🌐 Відкрити сайт',url=url)]])
     return keyboard(rows)
@@ -1683,13 +1697,15 @@ def menu_keyboard():
 async def telegram_menu_loop():
     """Only the configured private Telegram chat can control this service."""
     if bot is None:
+        set_status("telegram", "Не налаштовано TELEGRAM_BOT_TOKEN або TELEGRAM_CHAT_ID")
         return
     from telegram import BotCommand
     pending = {}
     offset = None
     async with Bot(token=TELEGRAM_BOT_TOKEN) as controller:
-        await controller.delete_webhook(drop_pending_updates=True)
+        await controller.delete_webhook(drop_pending_updates=False)
         await controller.set_my_commands([BotCommand('start','Відкрити меню'),BotCommand('menu','Правила та статус')])
+        set_status("telegram", "Бот підключений; напишіть /start у приватному чаті")
         while True:
             try:
                 updates = await controller.get_updates(offset=offset, timeout=20, read_timeout=30)
@@ -1697,9 +1713,12 @@ async def telegram_menu_loop():
                     offset = update.update_id + 1
                     chat = update.effective_chat
                     if not chat or str(chat.id) != TELEGRAM_CHAT_ID or chat.type != 'private':
+                        if chat:
+                            set_status("telegram", f"Команду відхилено: ID чату {chat.id} не відповідає дозволеному приватному чату. Перевірте TELEGRAM_CHAT_ID")
                         if update.callback_query:
                             await update.callback_query.answer('Немає доступу')
                         continue
+                    set_status("telegram", "Команди з дозволеного чату надходять")
                     query = update.callback_query
                     if query:
                         await query.answer()
@@ -1769,7 +1788,7 @@ async def telegram_menu_loop():
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                print(f'Telegram menu error: {type(exc).__name__}', flush=True)
+                set_status('telegram', safe_error(exc))
                 await asyncio.sleep(5)
 
 async def monitor_supervisor():
@@ -1779,18 +1798,20 @@ async def monitor_supervisor():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f'Monitor restarting: {type(exc).__name__}',flush=True)
+            set_status('source', 'Перезапуск моніторингу: '+safe_error(exc))
         await asyncio.sleep(10)
 
 async def telegram_supervisor():
-    if bot is None: return
+    if bot is None:
+        set_status('telegram', 'Не налаштовано TELEGRAM_BOT_TOKEN або TELEGRAM_CHAT_ID')
+        return
     while True:
         try:
             await telegram_menu_loop()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f'Telegram restarting: {type(exc).__name__}', flush=True)
+            set_status('telegram', 'Перезапуск бота: '+safe_error(exc))
         await asyncio.sleep(10)
 
 
